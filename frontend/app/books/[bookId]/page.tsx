@@ -3,7 +3,7 @@
 import dynamic from 'next/dynamic'
 import Link from 'next/link'
 import { useParams } from 'next/navigation'
-import { MouseEvent as ReactMouseEvent, memo, useCallback, useEffect, useMemo, useState } from 'react'
+import { MouseEvent as ReactMouseEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Chapter,
   ChapterSummary,
@@ -22,6 +22,10 @@ import {
 } from '@/lib/api'
 
 const MapPanel = dynamic(() => import('@/components/MapPanel'), { ssr: false })
+
+const DEFAULT_FONT_SIZE = 17
+const MIN_FONT_SIZE = 14
+const MAX_FONT_SIZE = 26
 
 type TextSegment = {
   text: string
@@ -124,6 +128,54 @@ function paragraphHasMention(paragraph: Paragraph, mentionId: number | null) {
 
 function paragraphHasCandidate(paragraph: Paragraph, candidateId: string | null) {
   return candidateId !== null && paragraph.candidates.some((candidate) => candidate.id === candidateId)
+}
+
+function weightedTextLength(text: string) {
+  let length = 0
+  for (const char of text) {
+    if (/\s/.test(char)) {
+      length += 0.3
+    } else if (/[\x00-\x7f]/.test(char)) {
+      length += 0.55
+    } else {
+      length += 1
+    }
+  }
+  return length
+}
+
+function estimateParagraphHeight(paragraph: Paragraph, width: number, fontSize: number) {
+  const lineHeight = fontSize * 1.85
+  const charsPerLine = Math.max(8, Math.floor(width / (fontSize * 1.02)))
+  const lines = Math.max(1, Math.ceil(weightedTextLength(paragraph.text) / charsPerLine))
+  return lines * lineHeight + fontSize * 1.1
+}
+
+function paginateParagraphs(paragraphs: Paragraph[], width: number, height: number, fontSize: number) {
+  if (!paragraphs.length) return [[]] as Paragraph[][]
+  const pageHeight = Math.max(fontSize * 8, height)
+  const pages: Paragraph[][] = []
+  let currentPage: Paragraph[] = []
+  let currentHeight = 0
+
+  for (const paragraph of paragraphs) {
+    const paragraphHeight = estimateParagraphHeight(paragraph, width, fontSize)
+    if (currentPage.length > 0 && currentHeight + paragraphHeight > pageHeight) {
+      pages.push(currentPage)
+      currentPage = []
+      currentHeight = 0
+    }
+    currentPage.push(paragraph)
+    currentHeight += paragraphHeight
+  }
+
+  if (currentPage.length > 0) pages.push(currentPage)
+  return pages
+}
+
+function pageIndexForParagraph(pages: Paragraph[][], paragraphId: number) {
+  const index = pages.findIndex((page) => page.some((paragraph) => paragraph.paragraph_id === paragraphId))
+  return index >= 0 ? index : null
 }
 
 const ParagraphView = memo(function ParagraphView({
@@ -242,11 +294,15 @@ function areParagraphViewPropsEqual(prev: ParagraphViewProps, next: ParagraphVie
 export default function BookPage() {
   const params = useParams<{ bookId: string }>()
   const bookId = Number(params?.bookId || 0)
+  const pageTextRef = useRef<HTMLDivElement | null>(null)
   const [chapters, setChapters] = useState<ChapterSummary[]>([])
   const [currentChapter, setCurrentChapter] = useState<Chapter | null>(null)
   const [places, setPlaces] = useState<PlaceCount[]>([])
   const [selectedMentionId, setSelectedMentionId] = useState<number | null>(null)
   const [focusedParagraphId, setFocusedParagraphId] = useState<number | null>(null)
+  const [pageIndex, setPageIndex] = useState(0)
+  const [fontSize, setFontSize] = useState(DEFAULT_FONT_SIZE)
+  const [pageBox, setPageBox] = useState({ width: 640, height: 640 })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [correction, setCorrection] = useState({
@@ -268,10 +324,12 @@ export default function BookPage() {
     canonical_name: string
   } | null>(null)
 
-  const loadChapter = useCallback(async (chapterId: number) => {
+  const loadChapter = useCallback(async (chapterId: number, targetPage: 'first' | 'last' = 'first') => {
     const chapter = await fetchChapter(chapterId)
     setCurrentChapter(chapter)
+    setPageIndex(targetPage === 'last' ? Number.MAX_SAFE_INTEGER : 0)
     setSelectedMentionId(null)
+    setFocusedParagraphId(null)
     setActiveMentionActionId(null)
     setSelectionAction(null)
   }, [])
@@ -326,6 +384,44 @@ export default function BookPage() {
     return byKey
   }, [uniqueMentions])
   const mentionOccurrenceRanks = useMemo(() => mentionOccurrenceRanksForChapter(currentChapter), [currentChapter])
+  const chapterIndex = useMemo(
+    () => chapters.findIndex((chapter) => chapter.id === currentChapter?.id),
+    [chapters, currentChapter?.id]
+  )
+  const pages = useMemo(
+    () => paginateParagraphs(currentChapter?.paragraphs || [], pageBox.width, pageBox.height, fontSize),
+    [currentChapter, fontSize, pageBox.height, pageBox.width]
+  )
+  const currentPageIndex = Math.min(Math.max(pageIndex, 0), Math.max(0, pages.length - 1))
+  const visibleParagraphs = pages[currentPageIndex] || []
+  const canGoToPreviousChapter = chapterIndex > 0
+  const canGoToNextChapter = chapterIndex >= 0 && chapterIndex < chapters.length - 1
+  const canGoPrevious = currentPageIndex > 0 || canGoToPreviousChapter
+  const canGoNext = currentPageIndex < pages.length - 1 || canGoToNextChapter
+  const previousLabel = currentPageIndex === 0 ? '上一章' : '上一页'
+  const nextLabel = currentPageIndex >= pages.length - 1 ? '下一章' : '下一页'
+
+  useEffect(() => {
+    const element = pageTextRef.current
+    if (!element) return
+
+    function updatePageBox() {
+      if (!element) return
+      setPageBox({
+        width: Math.max(240, element.clientWidth),
+        height: Math.max(240, element.clientHeight)
+      })
+    }
+
+    updatePageBox()
+    const observer = new ResizeObserver(updatePageBox)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    setPageIndex((value) => Math.min(Math.max(value, 0), Math.max(0, pages.length - 1)))
+  }, [pages.length])
 
   function resetCorrection() {
     setCorrection({
@@ -391,9 +487,38 @@ export default function BookPage() {
     openMentionCorrection(mention)
   }, [activeMentionActionId, firstMentionIdByKey, openMentionCorrection])
 
+  function goToPreviousPage() {
+    if (currentPageIndex > 0) {
+      setPageIndex((value) => Math.max(0, value - 1))
+      resetCorrection()
+      return
+    }
+    if (canGoToPreviousChapter) {
+      loadChapter(chapters[chapterIndex - 1].id, 'last')
+      resetCorrection()
+    }
+  }
+
+  function goToNextPage() {
+    if (currentPageIndex < pages.length - 1) {
+      setPageIndex((value) => Math.min(pages.length - 1, value + 1))
+      resetCorrection()
+      return
+    }
+    if (canGoToNextChapter) {
+      loadChapter(chapters[chapterIndex + 1].id, 'first')
+      resetCorrection()
+    }
+  }
+
+  function adjustFontSize(delta: number) {
+    setFontSize((value) => Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, value + delta)))
+  }
+
   function scrollToParagraph(paragraphId: number) {
     setFocusedParagraphId(paragraphId)
-    document.getElementById(`paragraph-${paragraphId}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    const targetPageIndex = pageIndexForParagraph(pages, paragraphId)
+    if (targetPageIndex !== null) setPageIndex(targetPageIndex)
   }
 
   const onMarkerClick = useCallback((mention: Mention) => {
@@ -615,38 +740,105 @@ export default function BookPage() {
             ))}
           </aside>
 
-          <article className="chapter-content" onMouseUp={openSelectionCandidate}>
-            <h1 className="chapter-title">{currentChapter?.title}</h1>
-            {loading ? <p className="muted">Loading...</p> : null}
-            {error ? <p className="muted">{error}</p> : null}
-            {currentChapter?.paragraphs.map((paragraph) => {
-              const activeMentionIdForParagraph = paragraphHasMention(paragraph, activeMentionActionId)
-                ? activeMentionActionId
-                : null
-              const activeCandidateId = correction.candidate?.id || null
-              const activeCandidateIdForParagraph = paragraphHasCandidate(paragraph, activeCandidateId)
-                ? activeCandidateId
-                : null
+          <article className="chapter-content paged-reader">
+            <div className="reader-tools" onClick={(event) => event.stopPropagation()}>
+              <button
+                type="button"
+                className="icon-button"
+                title="减小字号"
+                disabled={fontSize <= MIN_FONT_SIZE}
+                onClick={() => adjustFontSize(-1)}
+              >
+                🔍-
+              </button>
+              <button
+                type="button"
+                className="icon-button"
+                title="增大字号"
+                disabled={fontSize >= MAX_FONT_SIZE}
+                onClick={() => adjustFontSize(1)}
+              >
+                🔍+
+              </button>
+            </div>
 
-              return (
-                <ParagraphView
-                  key={paragraph.paragraph_id}
-                  paragraph={paragraph}
-                  focused={focusedParagraphId === paragraph.paragraph_id}
-                  firstMentionIds={firstMentionIds}
-                  mentionOccurrenceRanks={mentionOccurrenceRanks}
-                  activeMentionId={activeMentionIdForParagraph}
-                  activeCandidateId={activeCandidateIdForParagraph}
-                  candidateBusy={candidateBusy}
-                  mentionDeleteBusy={mentionDeleteBusy}
-                  onMentionClick={selectMention}
-                  onCandidateClick={openCandidateCorrection}
-                  onCandidateSearch={searchCandidate}
-                  onCandidateDelete={deleteCandidate}
-                  onMentionDelete={deleteSelectedMention}
-                />
-              )
-            })}
+            <button
+              type="button"
+              className="page-turn-zone page-turn-zone-left"
+              disabled={!canGoPrevious}
+              onClick={(event) => {
+                event.stopPropagation()
+                goToPreviousPage()
+              }}
+              aria-label={previousLabel}
+            >
+              &lt;
+            </button>
+            <button
+              type="button"
+              className="page-turn-zone page-turn-zone-right"
+              disabled={!canGoNext}
+              onClick={(event) => {
+                event.stopPropagation()
+                goToNextPage()
+              }}
+              aria-label={nextLabel}
+            >
+              &gt;
+            </button>
+
+            <div className="page-shell">
+              <h1 className="chapter-title">{currentChapter?.title}</h1>
+              {loading ? <p className="muted">Loading...</p> : null}
+              {error ? <p className="muted">{error}</p> : null}
+              <div
+                ref={pageTextRef}
+                className="page-text"
+                style={{ fontSize }}
+                onMouseUp={openSelectionCandidate}
+              >
+                {visibleParagraphs.map((paragraph) => {
+                  const activeMentionIdForParagraph = paragraphHasMention(paragraph, activeMentionActionId)
+                    ? activeMentionActionId
+                    : null
+                  const activeCandidateId = correction.candidate?.id || null
+                  const activeCandidateIdForParagraph = paragraphHasCandidate(paragraph, activeCandidateId)
+                    ? activeCandidateId
+                    : null
+
+                  return (
+                    <ParagraphView
+                      key={paragraph.paragraph_id}
+                      paragraph={paragraph}
+                      focused={focusedParagraphId === paragraph.paragraph_id}
+                      firstMentionIds={firstMentionIds}
+                      mentionOccurrenceRanks={mentionOccurrenceRanks}
+                      activeMentionId={activeMentionIdForParagraph}
+                      activeCandidateId={activeCandidateIdForParagraph}
+                      candidateBusy={candidateBusy}
+                      mentionDeleteBusy={mentionDeleteBusy}
+                      onMentionClick={selectMention}
+                      onCandidateClick={openCandidateCorrection}
+                      onCandidateSearch={searchCandidate}
+                      onCandidateDelete={deleteCandidate}
+                      onMentionDelete={deleteSelectedMention}
+                    />
+                  )
+                })}
+              </div>
+
+              <footer className="page-footer" onClick={(event) => event.stopPropagation()}>
+                <button type="button" className="secondary" disabled={!canGoPrevious} onClick={goToPreviousPage}>
+                  {previousLabel}
+                </button>
+                <span className="muted">
+                  {pages.length > 0 ? `${currentPageIndex + 1} / ${pages.length}` : '0 / 0'}
+                </span>
+                <button type="button" className="secondary" disabled={!canGoNext} onClick={goToNextPage}>
+                  {nextLabel}
+                </button>
+              </footer>
+            </div>
           </article>
         </div>
 
