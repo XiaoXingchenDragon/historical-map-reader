@@ -48,8 +48,16 @@ type SelectionAction = {
   left: number
 }
 
+type PageBlock = {
+  paragraph: Paragraph
+  startOffset: number
+  endOffset: number
+}
+
 type ParagraphViewProps = {
   paragraph: Paragraph
+  originalParagraphId?: number
+  offsetStart?: number
   focused: boolean
   firstMentionIds: Set<number>
   mentionOccurrenceRanks: Map<number, number>
@@ -139,6 +147,67 @@ function paragraphHasCandidate(paragraph: Paragraph, candidateId: string | null)
   return candidateId !== null && paragraph.candidates.some((candidate) => candidate.id === candidateId)
 }
 
+function clampInlineItems<T extends Mention | PlaceCandidate>(items: T[], startOffset: number, endOffset: number): T[] {
+  return items
+    .filter((item) => item.start_offset >= startOffset && item.end_offset <= endOffset)
+    .map((item) => ({
+      ...item,
+      start_offset: item.start_offset - startOffset,
+      end_offset: item.end_offset - startOffset
+    }))
+}
+
+function paragraphBlock(paragraph: Paragraph, startOffset = 0, endOffset = paragraph.text.length): PageBlock {
+  return { paragraph, startOffset, endOffset }
+}
+
+function sliceParagraphForBlock(block: PageBlock): Paragraph {
+  if (block.startOffset === 0 && block.endOffset === block.paragraph.text.length) return block.paragraph
+  return {
+    ...block.paragraph,
+    text: block.paragraph.text.slice(block.startOffset, block.endOffset),
+    mentions: clampInlineItems(block.paragraph.mentions, block.startOffset, block.endOffset),
+    candidates: clampInlineItems(block.paragraph.candidates, block.startOffset, block.endOffset)
+  }
+}
+
+function findChunkEnd(text: string, startOffset: number, targetOffset: number, minEnd: number) {
+  const safeTarget = Math.min(text.length, Math.max(minEnd, targetOffset))
+  const windowStart = Math.max(minEnd, safeTarget - 80)
+  const windowEnd = Math.min(text.length, safeTarget + 80)
+  const punctuation = /[。！？；.!?;]\s*/g
+  let bestEnd = safeTarget
+  let match: RegExpExecArray | null
+  punctuation.lastIndex = windowStart
+  while ((match = punctuation.exec(text)) && match.index <= windowEnd) {
+    const candidateEnd = match.index + match[0].length
+    if (candidateEnd >= minEnd) bestEnd = candidateEnd
+  }
+  if (bestEnd <= startOffset) bestEnd = Math.min(text.length, minEnd)
+  return bestEnd
+}
+
+function splitLargeParagraph(paragraph: Paragraph, paragraphHeight: number, pageHeight: number): PageBlock[] {
+  if (paragraphHeight <= pageHeight || paragraph.text.length <= 80) return [paragraphBlock(paragraph)]
+  const chunkCount = Math.max(2, Math.ceil(paragraphHeight / Math.max(1, pageHeight * 0.62)))
+  const targetLength = Math.max(80, Math.ceil(paragraph.text.length / chunkCount))
+  const blocks: PageBlock[] = []
+  let startOffset = 0
+
+  while (startOffset < paragraph.text.length) {
+    const minEnd = Math.min(paragraph.text.length, startOffset + Math.max(60, Math.floor(targetLength * 0.62)))
+    const targetEnd = Math.min(paragraph.text.length, startOffset + targetLength)
+    const endOffset =
+      targetEnd >= paragraph.text.length
+        ? paragraph.text.length
+        : findChunkEnd(paragraph.text, startOffset, targetEnd, minEnd)
+    blocks.push(paragraphBlock(paragraph, startOffset, endOffset))
+    startOffset = endOffset
+  }
+
+  return blocks
+}
+
 function fallbackParagraphHeight(paragraph: Paragraph, width: number, fontSize: number) {
   const lineHeight = fontSize * 1.85
   const charsPerLine = Math.max(8, Math.floor(width / fontSize))
@@ -152,35 +221,43 @@ function paginateParagraphs(
   fontSize: number,
   measuredHeights: Map<number, number>
 ) {
-  if (!paragraphs.length) return [[]] as Paragraph[][]
-  const pageHeight = Math.max(fontSize * 8, height)
-  const pages: Paragraph[][] = []
-  let currentPage: Paragraph[] = []
+  if (!paragraphs.length) return [[]] as PageBlock[][]
+  const pageHeight = Math.max(fontSize * 8, height) * 0.82
+  const pages: PageBlock[][] = []
+  let currentPage: PageBlock[] = []
   let currentHeight = 0
 
   for (const paragraph of paragraphs) {
     const paragraphHeight =
       measuredHeights.get(paragraph.paragraph_id) || fallbackParagraphHeight(paragraph, width, fontSize)
-    if (currentPage.length > 0 && currentHeight + paragraphHeight > pageHeight) {
-      pages.push(currentPage)
-      currentPage = []
-      currentHeight = 0
+    const blocks = splitLargeParagraph(paragraph, paragraphHeight, pageHeight)
+
+    for (const block of blocks) {
+      const blockRatio = (block.endOffset - block.startOffset) / Math.max(1, paragraph.text.length)
+      const blockHeight = Math.min(paragraphHeight, Math.max(fontSize * 2.95, paragraphHeight * blockRatio))
+      if (currentPage.length > 0 && currentHeight + blockHeight > pageHeight) {
+        pages.push(currentPage)
+        currentPage = []
+        currentHeight = 0
+      }
+      currentPage.push(block)
+      currentHeight += blockHeight
     }
-    currentPage.push(paragraph)
-    currentHeight += paragraphHeight
   }
 
   if (currentPage.length > 0) pages.push(currentPage)
   return pages
 }
 
-function pageIndexForParagraph(pages: Paragraph[][], paragraphId: number) {
-  const index = pages.findIndex((page) => page.some((paragraph) => paragraph.paragraph_id === paragraphId))
+function pageIndexForParagraph(pages: PageBlock[][], paragraphId: number) {
+  const index = pages.findIndex((page) => page.some((block) => block.paragraph.paragraph_id === paragraphId))
   return index >= 0 ? index : null
 }
 
 const ParagraphView = memo(function ParagraphView({
   paragraph,
+  originalParagraphId,
+  offsetStart = 0,
   focused,
   firstMentionIds,
   mentionOccurrenceRanks,
@@ -198,8 +275,9 @@ const ParagraphView = memo(function ParagraphView({
 
   return (
     <p
-      id={`paragraph-${paragraph.paragraph_id}`}
-      data-paragraph-id={paragraph.paragraph_id}
+      id={`paragraph-${originalParagraphId || paragraph.paragraph_id}`}
+      data-paragraph-id={originalParagraphId || paragraph.paragraph_id}
+      data-paragraph-offset={offsetStart}
       className={`paragraph ${focused ? 'focused' : ''}`}
     >
       {segments.map((segment, index) => {
@@ -240,6 +318,14 @@ const ParagraphView = memo(function ParagraphView({
         }
         if (segment.candidate) {
           const candidate = segment.candidate
+          const actionCandidate =
+            offsetStart > 0
+              ? {
+                  ...candidate,
+                  start_offset: candidate.start_offset + offsetStart,
+                  end_offset: candidate.end_offset + offsetStart
+                }
+              : candidate
           const isActiveCandidate = activeCandidateId === candidate.id
           return (
             <span
@@ -247,7 +333,7 @@ const ParagraphView = memo(function ParagraphView({
               className={`place-candidate ${isActiveCandidate ? 'active' : ''}`}
               onClick={(event) => {
                 event.stopPropagation()
-                onCandidateClick(candidate, paragraph.paragraph_id)
+                onCandidateClick(actionCandidate, originalParagraphId || paragraph.paragraph_id)
               }}
             >
               {segment.text}
@@ -257,7 +343,7 @@ const ParagraphView = memo(function ParagraphView({
                     type="button"
                     title="Search"
                     disabled={candidateBusy}
-                    onClick={() => onCandidateSearch(candidate)}
+                    onClick={() => onCandidateSearch(actionCandidate)}
                   >
                     搜
                   </button>
@@ -282,6 +368,8 @@ const ParagraphView = memo(function ParagraphView({
 
 function areParagraphViewPropsEqual(prev: ParagraphViewProps, next: ParagraphViewProps) {
   if (prev.paragraph !== next.paragraph) return false
+  if (prev.originalParagraphId !== next.originalParagraphId) return false
+  if (prev.offsetStart !== next.offsetStart) return false
   if (prev.focused !== next.focused) return false
   if (prev.firstMentionIds !== next.firstMentionIds) return false
   if (prev.mentionOccurrenceRanks !== next.mentionOccurrenceRanks) return false
@@ -693,13 +781,14 @@ export default function BookPage() {
       }
 
       const paragraphId = Number(paragraphElement.dataset.paragraphId)
+      const paragraphOffset = Number(paragraphElement.dataset.paragraphOffset || 0)
       const paragraph = currentChapter?.paragraphs.find((item) => item.paragraph_id === paragraphId)
       if (!paragraph) return
 
       const beforeRange = document.createRange()
       beforeRange.selectNodeContents(paragraphElement)
       beforeRange.setEnd(range.startContainer, range.startOffset)
-      let startOffset = beforeRange.toString().length
+      let startOffset = paragraphOffset + beforeRange.toString().length
       let endOffset = startOffset + range.toString().length
 
       const selectedText = paragraph.text.slice(startOffset, endOffset)
@@ -821,20 +910,24 @@ export default function BookPage() {
                 style={{ fontSize }}
                 onMouseUp={openSelectionCandidate}
               >
-                {visibleParagraphs.map((paragraph) => {
-                  const activeMentionIdForParagraph = paragraphHasMention(paragraph, activeMentionActionId)
+                {visibleParagraphs.map((block) => {
+                  const paragraph = sliceParagraphForBlock(block)
+                  const originalParagraph = block.paragraph
+                  const activeMentionIdForParagraph = paragraphHasMention(originalParagraph, activeMentionActionId)
                     ? activeMentionActionId
                     : null
                   const activeCandidateId = correction.candidate?.id || null
-                  const activeCandidateIdForParagraph = paragraphHasCandidate(paragraph, activeCandidateId)
+                  const activeCandidateIdForParagraph = paragraphHasCandidate(originalParagraph, activeCandidateId)
                     ? activeCandidateId
                     : null
 
                   return (
                     <ParagraphView
-                      key={paragraph.paragraph_id}
+                      key={`${originalParagraph.paragraph_id}:${block.startOffset}:${block.endOffset}`}
                       paragraph={paragraph}
-                      focused={focusedParagraphId === paragraph.paragraph_id}
+                      originalParagraphId={originalParagraph.paragraph_id}
+                      offsetStart={block.startOffset}
+                      focused={focusedParagraphId === originalParagraph.paragraph_id}
                       firstMentionIds={firstMentionIds}
                       mentionOccurrenceRanks={mentionOccurrenceRanks}
                       activeMentionId={activeMentionIdForParagraph}
