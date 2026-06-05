@@ -1,0 +1,26 @@
+[
+  {
+    "canonical_name": "Constantinople",
+    "aliases": ["君堡", "君士坦丁堡城", "拜占廷", "新罗马"]
+  },
+  {
+    "canonical_name": "Xi'an",
+    "aliases": ["长安", "Chang'an", "Changan"]
+  },
+  {
+    "canonical_name": "Rome",
+    "aliases": ["罗马城", "永恒之城"]
+  },
+  {
+    "canonical_name": "Venice",
+    "aliases": ["威尼斯共和国", "水城"]
+  },
+  {
+    "canonical_name": "Algiers",
+    "aliases": ["阿尔及尔城", "阿尔杰尔"]
+  },
+  {
+    "canonical_name": "Dardanelles",
+    "aliases": ["达达尼尔海峡", "赫勒斯滂", "赫勒斯滂海峡"]
+  }
+]

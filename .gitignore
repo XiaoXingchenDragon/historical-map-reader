@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Backend local runtime
+backend/.venv/
+backend/.env
+backend/*.log
+backend/data/reader.db
+backend/data/reader.db-*
+backend/data/books/*
+!backend/data/books/.gitkeep
+backend/data/imports/geonames/*
+!backend/data/imports/geonames/.gitkeep
+
+# Frontend local runtime
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/*.log
+frontend/tsconfig.tsbuildinfo
+
+# Local test/source books
+*.epub
+*.pdf
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

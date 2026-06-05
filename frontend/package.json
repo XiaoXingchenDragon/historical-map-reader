@@ -1,0 +1,25 @@
+{
+  "name": "historical-map-reader-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -H ::",
+    "build": "next build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "epubjs": "0.3.93",
+    "leaflet": "1.9.4",
+    "next": "16.2.7",
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
+  },
+  "devDependencies": {
+    "@types/leaflet": "1.9.16",
+    "@types/node": "22.10.2",
+    "@types/react": "19.0.1",
+    "@types/react-dom": "19.0.2",
+    "typescript": "5.7.2",
+    "eslint": "9.17.0"
+  }
+}
