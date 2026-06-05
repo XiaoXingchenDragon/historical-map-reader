@@ -65,6 +65,15 @@ export type PlaceCount = {
   count: number
 }
 
+export type ProcessProgress = {
+  book_id: number
+  stage: string
+  percent: number
+  current: number
+  total: number
+  detail: string
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, init)
   if (!response.ok) {
@@ -113,6 +122,10 @@ export async function uploadAndProcessBook(file: File) {
 
 export function processBook(bookId: number) {
   return request(`/api/books/${bookId}/process`, { method: 'POST' })
+}
+
+export function fetchProcessProgress(bookId: number) {
+  return request<ProcessProgress>(`/api/books/${bookId}/process-progress`)
 }
 
 export function fetchChapters(bookId: number) {

@@ -111,6 +111,8 @@ def health() -> dict:
 PROJECT_DIR = BASE_DIR.parent
 PROCESS_LOCKS: dict[int, Lock] = {}
 PROCESS_LOCKS_GUARD = Lock()
+PROCESS_PROGRESS: dict[int, dict] = {}
+PROCESS_PROGRESS_GUARD = Lock()
 
 
 def process_lock_for_book(book_id: int) -> Lock:
@@ -120,6 +122,41 @@ def process_lock_for_book(book_id: int) -> Lock:
             lock = Lock()
             PROCESS_LOCKS[book_id] = lock
         return lock
+
+
+def set_process_progress(
+    book_id: int,
+    stage: str,
+    percent: int,
+    current: int = 0,
+    total: int = 0,
+    detail: str = "",
+) -> None:
+    with PROCESS_PROGRESS_GUARD:
+        PROCESS_PROGRESS[book_id] = {
+            "book_id": book_id,
+            "stage": stage,
+            "percent": max(0, min(100, percent)),
+            "current": current,
+            "total": total,
+            "detail": detail,
+        }
+
+
+@app.get("/api/books/{book_id}/process-progress")
+def get_process_progress(book_id: int) -> dict:
+    with PROCESS_PROGRESS_GUARD:
+        return PROCESS_PROGRESS.get(
+            book_id,
+            {
+                "book_id": book_id,
+                "stage": "idle",
+                "percent": 0,
+                "current": 0,
+                "total": 0,
+                "detail": "",
+            },
+        )
 
 
 def local_import_candidates() -> list[Path]:
@@ -199,10 +236,13 @@ async def upload_book(file: UploadFile = File(...), session: Session = Depends(g
 @app.post("/api/books/{book_id}/process")
 def process_book(book_id: int, session: Session = Depends(get_session)) -> dict:
     with process_lock_for_book(book_id):
+        set_process_progress(book_id, "starting", 1, detail="Preparing book")
         book = session.get(Book, book_id)
         if not book:
+            set_process_progress(book_id, "error", 0, detail="Book not found")
             raise HTTPException(status_code=404, detail="Book not found.")
 
+        set_process_progress(book_id, "cleaning", 3, detail="Clearing previous parsed data")
         session.execute(delete(PlaceMention).where(PlaceMention.book_id == book_id))
         old_chapter_ids = select(Chapter.id).where(Chapter.book_id == book_id)
         session.execute(delete(Paragraph).where(Paragraph.chapter_id.in_(old_chapter_ids)))
@@ -211,7 +251,17 @@ def process_book(book_id: int, session: Session = Depends(get_session)) -> dict:
 
         seed_places(session)
         aliases = aliases_by_place(session)
+        set_process_progress(book_id, "parsing", 8, detail="Reading EPUB/PDF text")
         parsed = parse_book(book.file_path)
+        total_paragraphs = sum(len(chapter_data["paragraphs"]) for chapter_data in parsed)
+        set_process_progress(
+            book_id,
+            "processing",
+            10,
+            current=0,
+            total=total_paragraphs,
+            detail=f"Processing 0/{total_paragraphs} paragraphs",
+        )
         mention_count = 0
         paragraph_count = 0
         ignored_names = set(
@@ -236,6 +286,16 @@ def process_book(book_id: int, session: Session = Depends(get_session)) -> dict:
                 session.add(paragraph)
                 session.flush()
                 paragraph_count += 1
+                if paragraph_count == 1 or paragraph_count % 25 == 0 or paragraph_count == total_paragraphs:
+                    percent = 10 + int((paragraph_count / max(1, total_paragraphs)) * 84)
+                    set_process_progress(
+                        book_id,
+                        "processing",
+                        percent,
+                        current=paragraph_count,
+                        total=total_paragraphs,
+                        detail=f"Processing {paragraph_count}/{total_paragraphs} paragraphs",
+                    )
 
                 mention_candidates = apply_parenthetical_aliases(session, text, extract_mentions(text, aliases), aliases)
                 for candidate in mention_candidates:
@@ -255,7 +315,23 @@ def process_book(book_id: int, session: Session = Depends(get_session)) -> dict:
                     session.add(mention)
                     mention_count += 1
 
+        set_process_progress(
+            book_id,
+            "saving",
+            96,
+            current=paragraph_count,
+            total=total_paragraphs,
+            detail="Saving parsed places",
+        )
         session.commit()
+        set_process_progress(
+            book_id,
+            "done",
+            100,
+            current=paragraph_count,
+            total=total_paragraphs,
+            detail=f"Parsed {paragraph_count} paragraphs and {mention_count} mentions",
+        )
         return {
             "book_id": book.id,
             "chapters": len(parsed),
