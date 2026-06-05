@@ -1,4 +1,4 @@
-export const apiBase = process.env.NEXT_PUBLIC_API_BASE || ''
+export const apiBase = process.env.NEXT_PUBLIC_API_BASE || 'http://127.0.0.1:8000'
 
 export type Book = {
   id: number
@@ -77,8 +77,12 @@ export type ProcessProgress = {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, init)
   if (!response.ok) {
-    const body = await response.json().catch(() => null)
-    throw new Error(body?.detail || response.statusText)
+    const contentType = response.headers.get('content-type') || ''
+    const body = contentType.includes('application/json')
+      ? await response.json().catch(() => null)
+      : await response.text().catch(() => '')
+    const detail = typeof body === 'string' ? body : body?.detail
+    throw new Error(detail || response.statusText)
   }
   return response.json() as Promise<T>
 }
