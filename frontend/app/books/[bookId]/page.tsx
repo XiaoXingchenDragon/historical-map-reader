@@ -3,7 +3,16 @@
 import dynamic from 'next/dynamic'
 import Link from 'next/link'
 import { useParams } from 'next/navigation'
-import { MouseEvent as ReactMouseEvent, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  MouseEvent as ReactMouseEvent,
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react'
 import {
   Chapter,
   ChapterSummary,
@@ -130,28 +139,19 @@ function paragraphHasCandidate(paragraph: Paragraph, candidateId: string | null)
   return candidateId !== null && paragraph.candidates.some((candidate) => candidate.id === candidateId)
 }
 
-function weightedTextLength(text: string) {
-  let length = 0
-  for (const char of text) {
-    if (/\s/.test(char)) {
-      length += 0.3
-    } else if (/[\x00-\x7f]/.test(char)) {
-      length += 0.55
-    } else {
-      length += 1
-    }
-  }
-  return length
-}
-
-function estimateParagraphHeight(paragraph: Paragraph, width: number, fontSize: number) {
+function fallbackParagraphHeight(paragraph: Paragraph, width: number, fontSize: number) {
   const lineHeight = fontSize * 1.85
-  const charsPerLine = Math.max(8, Math.floor(width / (fontSize * 1.02)))
-  const lines = Math.max(1, Math.ceil(weightedTextLength(paragraph.text) / charsPerLine))
-  return lines * lineHeight + fontSize * 1.1
+  const charsPerLine = Math.max(8, Math.floor(width / fontSize))
+  return Math.max(lineHeight, Math.ceil(paragraph.text.length / charsPerLine) * lineHeight + fontSize * 1.1)
 }
 
-function paginateParagraphs(paragraphs: Paragraph[], width: number, height: number, fontSize: number) {
+function paginateParagraphs(
+  paragraphs: Paragraph[],
+  width: number,
+  height: number,
+  fontSize: number,
+  measuredHeights: Map<number, number>
+) {
   if (!paragraphs.length) return [[]] as Paragraph[][]
   const pageHeight = Math.max(fontSize * 8, height)
   const pages: Paragraph[][] = []
@@ -159,7 +159,8 @@ function paginateParagraphs(paragraphs: Paragraph[], width: number, height: numb
   let currentHeight = 0
 
   for (const paragraph of paragraphs) {
-    const paragraphHeight = estimateParagraphHeight(paragraph, width, fontSize)
+    const paragraphHeight =
+      measuredHeights.get(paragraph.paragraph_id) || fallbackParagraphHeight(paragraph, width, fontSize)
     if (currentPage.length > 0 && currentHeight + paragraphHeight > pageHeight) {
       pages.push(currentPage)
       currentPage = []
@@ -295,6 +296,7 @@ export default function BookPage() {
   const params = useParams<{ bookId: string }>()
   const bookId = Number(params?.bookId || 0)
   const pageTextRef = useRef<HTMLDivElement | null>(null)
+  const measureRef = useRef<HTMLDivElement | null>(null)
   const [chapters, setChapters] = useState<ChapterSummary[]>([])
   const [currentChapter, setCurrentChapter] = useState<Chapter | null>(null)
   const [places, setPlaces] = useState<PlaceCount[]>([])
@@ -303,6 +305,7 @@ export default function BookPage() {
   const [pageIndex, setPageIndex] = useState(0)
   const [fontSize, setFontSize] = useState(DEFAULT_FONT_SIZE)
   const [pageBox, setPageBox] = useState({ width: 640, height: 640 })
+  const [measuredHeights, setMeasuredHeights] = useState<Map<number, number>>(() => new Map())
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [correction, setCorrection] = useState({
@@ -389,8 +392,8 @@ export default function BookPage() {
     [chapters, currentChapter?.id]
   )
   const pages = useMemo(
-    () => paginateParagraphs(currentChapter?.paragraphs || [], pageBox.width, pageBox.height, fontSize),
-    [currentChapter, fontSize, pageBox.height, pageBox.width]
+    () => paginateParagraphs(currentChapter?.paragraphs || [], pageBox.width, pageBox.height, fontSize, measuredHeights),
+    [currentChapter, fontSize, measuredHeights, pageBox.height, pageBox.width]
   )
   const currentPageIndex = Math.min(Math.max(pageIndex, 0), Math.max(0, pages.length - 1))
   const visibleParagraphs = pages[currentPageIndex] || []
@@ -398,8 +401,6 @@ export default function BookPage() {
   const canGoToNextChapter = chapterIndex >= 0 && chapterIndex < chapters.length - 1
   const canGoPrevious = currentPageIndex > 0 || canGoToPreviousChapter
   const canGoNext = currentPageIndex < pages.length - 1 || canGoToNextChapter
-  const previousLabel = currentPageIndex === 0 ? '上一章' : '上一页'
-  const nextLabel = currentPageIndex >= pages.length - 1 ? '下一章' : '下一页'
 
   useEffect(() => {
     const element = pageTextRef.current
@@ -422,6 +423,23 @@ export default function BookPage() {
   useEffect(() => {
     setPageIndex((value) => Math.min(Math.max(value, 0), Math.max(0, pages.length - 1)))
   }, [pages.length])
+
+  useLayoutEffect(() => {
+    const measureElement = measureRef.current
+    if (!measureElement || !currentChapter) {
+      setMeasuredHeights(new Map())
+      return
+    }
+
+    const nextHeights = new Map<number, number>()
+    measureElement.querySelectorAll<HTMLElement>('[data-measure-paragraph-id]').forEach((element) => {
+      const paragraphId = Number(element.dataset.measureParagraphId)
+      if (Number.isFinite(paragraphId)) {
+        nextHeights.set(paragraphId, element.getBoundingClientRect().height)
+      }
+    })
+    setMeasuredHeights(nextHeights)
+  }, [currentChapter, fontSize, pageBox.width])
 
   function resetCorrection() {
     setCorrection({
@@ -493,10 +511,7 @@ export default function BookPage() {
       resetCorrection()
       return
     }
-    if (canGoToPreviousChapter) {
-      loadChapter(chapters[chapterIndex - 1].id, 'last')
-      resetCorrection()
-    }
+    goToPreviousChapter()
   }
 
   function goToNextPage() {
@@ -505,10 +520,19 @@ export default function BookPage() {
       resetCorrection()
       return
     }
-    if (canGoToNextChapter) {
-      loadChapter(chapters[chapterIndex + 1].id, 'first')
-      resetCorrection()
-    }
+    goToNextChapter()
+  }
+
+  function goToPreviousChapter() {
+    if (!canGoToPreviousChapter) return
+    loadChapter(chapters[chapterIndex - 1].id, 'last')
+    resetCorrection()
+  }
+
+  function goToNextChapter() {
+    if (!canGoToNextChapter) return
+    loadChapter(chapters[chapterIndex + 1].id, 'first')
+    resetCorrection()
   }
 
   function adjustFontSize(delta: number) {
@@ -770,7 +794,7 @@ export default function BookPage() {
                 event.stopPropagation()
                 goToPreviousPage()
               }}
-              aria-label={previousLabel}
+              aria-label="上一页"
             >
               &lt;
             </button>
@@ -782,7 +806,7 @@ export default function BookPage() {
                 event.stopPropagation()
                 goToNextPage()
               }}
-              aria-label={nextLabel}
+              aria-label="下一页"
             >
               &gt;
             </button>
@@ -827,15 +851,48 @@ export default function BookPage() {
                 })}
               </div>
 
+              <div
+                ref={measureRef}
+                className="page-measure"
+                style={{ fontSize, width: pageBox.width }}
+                aria-hidden="true"
+              >
+                {currentChapter?.paragraphs.map((paragraph) => (
+                  <p
+                    key={paragraph.paragraph_id}
+                    className="paragraph"
+                    data-measure-paragraph-id={paragraph.paragraph_id}
+                  >
+                    {paragraph.text}
+                  </p>
+                ))}
+              </div>
+
               <footer className="page-footer" onClick={(event) => event.stopPropagation()}>
                 <button type="button" className="secondary" disabled={!canGoPrevious} onClick={goToPreviousPage}>
-                  {previousLabel}
+                  上一页
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={!canGoToPreviousChapter}
+                  onClick={goToPreviousChapter}
+                >
+                  上一章
                 </button>
                 <span className="muted">
                   {pages.length > 0 ? `${currentPageIndex + 1} / ${pages.length}` : '0 / 0'}
                 </span>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={!canGoToNextChapter}
+                  onClick={goToNextChapter}
+                >
+                  下一章
+                </button>
                 <button type="button" className="secondary" disabled={!canGoNext} onClick={goToNextPage}>
-                  {nextLabel}
+                  下一页
                 </button>
               </footer>
             </div>

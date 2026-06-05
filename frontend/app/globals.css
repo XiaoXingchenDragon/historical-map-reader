@@ -176,7 +176,7 @@ button:disabled {
   display: flex;
   gap: 0.45rem;
   position: absolute;
-  right: 1rem;
+  right: calc(clamp(2.4rem, 5vw, 3.8rem) + 1rem);
   top: 0.85rem;
   z-index: 300;
 }
@@ -214,7 +214,7 @@ button:disabled {
   border-top: 1px solid #dedbd2;
   display: grid;
   gap: 0.8rem;
-  grid-template-columns: minmax(96px, auto) 1fr minmax(96px, auto);
+  grid-template-columns: minmax(88px, auto) minmax(88px, auto) 1fr minmax(88px, auto) minmax(88px, auto);
   padding-top: 0.75rem;
 }
 
@@ -255,6 +255,16 @@ button:disabled {
 
 .page-turn-zone-right {
   right: 0;
+}
+
+.page-measure {
+  left: -10000px;
+  overflow: visible;
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  visibility: hidden;
+  z-index: -1;
 }
 
 .chapter-title {
