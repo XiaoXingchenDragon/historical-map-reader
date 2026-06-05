@@ -240,6 +240,33 @@ button:disabled {
   padding: 0.25rem 0.2rem;
 }
 
+.chapter-progress {
+  background: #eeeeee;
+  border-radius: 999px;
+  height: 5px;
+  margin: 0.45rem 0 0.65rem;
+  overflow: hidden;
+}
+
+.chapter-progress-bar {
+  animation: chapter-progress-slide 900ms ease-in-out infinite;
+  background: #cfcfcf;
+  border-radius: inherit;
+  height: 100%;
+  transform: translateX(-100%);
+  width: 38%;
+}
+
+@keyframes chapter-progress-slide {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(265%);
+  }
+}
+
 .page-footer {
   align-items: center;
   border-top: 1px solid #dedbd2;

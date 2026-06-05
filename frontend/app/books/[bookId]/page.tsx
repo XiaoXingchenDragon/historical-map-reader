@@ -35,6 +35,7 @@ const MapPanel = dynamic(() => import('@/components/MapPanel'), { ssr: false })
 const DEFAULT_FONT_SIZE = 17
 const MIN_FONT_SIZE = 14
 const MAX_FONT_SIZE = 26
+const BOOKMARK_PREFIX = 'historical-map-reader:bookmark:'
 
 type TextSegment = {
   text: string
@@ -52,6 +53,11 @@ type PageBlock = {
   paragraph: Paragraph
   startOffset: number
   endOffset: number
+}
+
+type Bookmark = {
+  chapterId: number
+  pageIndex: number
 }
 
 type ParagraphViewProps = {
@@ -254,6 +260,35 @@ function pageIndexForParagraph(pages: PageBlock[][], paragraphId: number) {
   return index >= 0 ? index : null
 }
 
+function bookmarkKey(bookId: number) {
+  return `${BOOKMARK_PREFIX}${bookId}`
+}
+
+function readBookmark(bookId: number): Bookmark | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(bookmarkKey(bookId))
+    if (!raw) return null
+    const bookmark = JSON.parse(raw) as Partial<Bookmark>
+    if (!Number.isFinite(bookmark.chapterId) || !Number.isFinite(bookmark.pageIndex)) return null
+    return {
+      chapterId: Number(bookmark.chapterId),
+      pageIndex: Math.max(0, Number(bookmark.pageIndex))
+    }
+  } catch {
+    return null
+  }
+}
+
+function writeBookmark(bookId: number, bookmark: Bookmark) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(bookmarkKey(bookId), JSON.stringify(bookmark))
+  } catch {
+    // Ignore storage quota or privacy-mode failures; reading should keep working.
+  }
+}
+
 const ParagraphView = memo(function ParagraphView({
   paragraph,
   originalParagraphId,
@@ -395,6 +430,7 @@ export default function BookPage() {
   const [pageBox, setPageBox] = useState({ width: 640, height: 640 })
   const [measuredHeights, setMeasuredHeights] = useState<Map<number, number>>(() => new Map())
   const [loading, setLoading] = useState(true)
+  const [chapterLoading, setChapterLoading] = useState(false)
   const [error, setError] = useState('')
   const [correction, setCorrection] = useState({
     mention: null as Mention | null,
@@ -416,13 +452,18 @@ export default function BookPage() {
   } | null>(null)
 
   const loadChapter = useCallback(async (chapterId: number, targetPage: 'first' | 'last' = 'first') => {
-    const chapter = await fetchChapter(chapterId)
-    setCurrentChapter(chapter)
-    setPageIndex(targetPage === 'last' ? Number.MAX_SAFE_INTEGER : 0)
-    setSelectedMentionId(null)
-    setFocusedParagraphId(null)
-    setActiveMentionActionId(null)
-    setSelectionAction(null)
+    setChapterLoading(true)
+    try {
+      const chapter = await fetchChapter(chapterId)
+      setCurrentChapter(chapter)
+      setPageIndex(targetPage === 'last' ? Number.MAX_SAFE_INTEGER : 0)
+      setSelectedMentionId(null)
+      setFocusedParagraphId(null)
+      setActiveMentionActionId(null)
+      setSelectionAction(null)
+    } finally {
+      setChapterLoading(false)
+    }
   }, [])
 
   const reloadBook = useCallback(async () => {
@@ -431,7 +472,12 @@ export default function BookPage() {
     setChapters(chapterList)
     setPlaces(placeList)
     if (chapterList.length > 0) {
-      await loadChapter(chapterList[0].id)
+      const bookmark = readBookmark(bookId)
+      const bookmarkedChapter = bookmark
+        ? chapterList.find((chapter) => chapter.id === bookmark.chapterId)
+        : null
+      await loadChapter(bookmarkedChapter?.id || chapterList[0].id)
+      if (bookmarkedChapter && bookmark) setPageIndex(bookmark.pageIndex)
     } else {
       setCurrentChapter(null)
     }
@@ -489,6 +535,14 @@ export default function BookPage() {
   const canGoToNextChapter = chapterIndex >= 0 && chapterIndex < chapters.length - 1
   const canGoPrevious = currentPageIndex > 0 || canGoToPreviousChapter
   const canGoNext = currentPageIndex < pages.length - 1 || canGoToNextChapter
+
+  useEffect(() => {
+    if (!bookId || !currentChapter || loading || chapterLoading || pages.length === 0) return
+    writeBookmark(bookId, {
+      chapterId: currentChapter.id,
+      pageIndex: currentPageIndex
+    })
+  }, [bookId, chapterLoading, currentChapter, currentPageIndex, loading, pages.length])
 
   useEffect(() => {
     const element = pageTextRef.current
@@ -599,7 +653,7 @@ export default function BookPage() {
       resetCorrection()
       return
     }
-    goToPreviousChapter()
+    goToPreviousChapter('last')
   }
 
   function goToNextPage() {
@@ -611,9 +665,9 @@ export default function BookPage() {
     goToNextChapter()
   }
 
-  function goToPreviousChapter() {
+  function goToPreviousChapter(targetPage: 'first' | 'last' = 'first') {
     if (!canGoToPreviousChapter) return
-    loadChapter(chapters[chapterIndex - 1].id, 'last')
+    loadChapter(chapters[chapterIndex - 1].id, targetPage)
     resetCorrection()
   }
 
@@ -961,6 +1015,12 @@ export default function BookPage() {
                 ))}
               </div>
 
+              {chapterLoading ? (
+                <div className="chapter-progress" aria-label="正在切换章节">
+                  <div className="chapter-progress-bar" />
+                </div>
+              ) : null}
+
               <footer className="page-footer" onClick={(event) => event.stopPropagation()}>
                 <button type="button" className="secondary" disabled={!canGoPrevious} onClick={goToPreviousPage}>
                   上一页
@@ -969,7 +1029,7 @@ export default function BookPage() {
                   type="button"
                   className="secondary"
                   disabled={!canGoToPreviousChapter}
-                  onClick={goToPreviousChapter}
+                  onClick={() => goToPreviousChapter()}
                 >
                   上一章
                 </button>
